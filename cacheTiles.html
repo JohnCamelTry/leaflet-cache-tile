@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="dist/leaflet.css"/>
     <script src="dist/leaflet.js"></script>
-    <script src="dist/axios.min.js"></script>
     <style type="text/css">
         html{height:100%}
         body{height:100%;margin:0px;padding:0px}
@@ -13,11 +12,52 @@
             height: 99vh;
             width:  99vw;
         }
+        #cacheStatus {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font: 13px/1.5 system-ui, sans-serif;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+            min-width: 170px;
+        }
+        #cacheStatus .net { font-weight: 600; }
+        #cacheStatus .row { display: flex; justify-content: space-between; gap: 10px; }
+        #cacheStatus button {
+            margin-top: 8px;
+            width: 100%;
+            padding: 5px;
+            cursor: pointer;
+            border: 1px solid #c62828;
+            background: #fff;
+            color: #c62828;
+            border-radius: 4px;
+        }
+        #cacheStatus button:hover { background: #c62828; color: #fff; }
     </style>
 </head>
 <body>
     <div id="mapid"></div>
+    <div id="cacheStatus">
+        <div class="net" id="netStatus">● …</div>
+        <div class="row"><span>Tiles:</span><span id="tileCount">–</span></div>
+        <div class="row"><span>Storage:</span><span id="storageUsage">–</span></div>
+        <button id="clearCacheBtn">Clear cache</button>
+    </div>
     <script>
+        const CONFIG = {
+            dbName: "mapCache",
+            dbVersion: 2,
+            storeName: "tiles",
+            retries: 3,
+            retryDelay: 1000,
+            hardSkipThreshold: 95 // % of quota: stop caching NEW tiles above this (existing tiles are never auto-deleted)
+        };
+
         var point = L.latLng(64.1355, -21.8954); //Reykjavik
         var OSM = L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", { attribution: '' });
 
@@ -27,8 +67,6 @@
             "OSM": OS
         };
 
-        const EarthRadius = 6378137;
-
         var mymap = L.map('mapid', {
             layers: [OS],
             zoomControl: false,
@@ -37,8 +75,8 @@
         }).setView(point, 14);
 
         L.control.layers(baseLayers, {}, { collapsed: true }).addTo(mymap);
-		
-		mymap.attributionControl.setPrefix('<img width="0" height="0">');
+
+        mymap.attributionControl.setPrefix('<img width="0" height="0">');
 
         async function checkStorageQuota() {
             if ('storage' in navigator && 'estimate' in navigator.storage) {
@@ -46,30 +84,26 @@
                     const quota = await navigator.storage.estimate();
                     const used = quota.usage;
                     const total = quota.quota;
-                    const percentUsed = (used / total) * 100;
-                    console.log(`Used: ${(used / (1024 * 1024)).toFixed(2)} MB of ${(total / (1024 * 1024)).toFixed(2)} MB (${percentUsed.toFixed(2)}%)`);
-                    if (percentUsed > 85) {
-                        console.warn('Warning: You have used more than 85% of available storage!');
-                    }
+                    const percentUsed = total ? (used / total) * 100 : 0;
                     return { used, total, percentUsed };
                 } catch (error) {
                     console.error('Error assessing storage:', error);
                     return null;
                 }
-            } else {
-                console.warn('StorageManager API is not supported in this browser.');
-                return null;
             }
+            return null;
         }
 
         let dbPromise = null;
         function openDatabase() {
             if (!dbPromise) {
                 dbPromise = new Promise((resolve, reject) => {
-                    var dbRequest = indexedDB.open("mapCache", 1);
+                    var dbRequest = indexedDB.open(CONFIG.dbName, CONFIG.dbVersion);
                     dbRequest.onupgradeneeded = function (event) {
                         var db = event.target.result;
-                        db.createObjectStore("tiles", { keyPath: "url" });
+                        if (!db.objectStoreNames.contains(CONFIG.storeName)) {
+                            db.createObjectStore(CONFIG.storeName, { keyPath: "url" });
+                        }
                     };
                     dbRequest.onsuccess = function (event) {
                         resolve(event.target.result);
@@ -84,10 +118,14 @@
             return dbPromise;
         }
 
-        async function fetchWithRetry(url, retries = 3, delay = 1000) {
+        async function fetchTileBlob(url, retries = CONFIG.retries, delay = CONFIG.retryDelay) {
             for (let i = 0; i < retries; i++) {
                 try {
-                    return await axios.get(url, { responseType: "blob" });
+                    const response = await fetch(url, { mode: "cors" });
+                    if (!response.ok) {
+                        throw new Error(`Network response failed. Status: ${response.status}`);
+                    }
+                    return await response.blob();
                 } catch (error) {
                     if (i < retries - 1) {
                         console.warn(`Retry ${i + 1}/${retries} for ${url}`);
@@ -99,20 +137,70 @@
             }
         }
 
+        // ---- IndexedDB tile store helpers ----
+
+        async function putTile(url, blob) {
+            const db = await openDatabase();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction([CONFIG.storeName], "readwrite");
+                tx.objectStore(CONFIG.storeName).put({ url, blob });
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        // Returns the cached blob, or null on a miss. Cached tiles are kept indefinitely
+        // and only removed when the user clears the cache manually.
+        async function getCachedTile(url) {
+            try {
+                const db = await openDatabase();
+                return new Promise((resolve) => {
+                    const store = db.transaction([CONFIG.storeName], "readonly")
+                        .objectStore(CONFIG.storeName);
+                    const getRequest = store.get(url);
+                    getRequest.onsuccess = function () {
+                        resolve(getRequest.result ? getRequest.result.blob : null);
+                    };
+                    getRequest.onerror = function () {
+                        console.error("Error retrieving tile from IndexedDB");
+                        resolve(null);
+                    };
+                });
+            } catch (error) {
+                console.error("Error retrieving tile from IndexedDB:", error);
+                return null;
+            }
+        }
+
+        async function countTiles() {
+            try {
+                const db = await openDatabase();
+                return new Promise((resolve) => {
+                    const req = db.transaction([CONFIG.storeName], "readonly")
+                        .objectStore(CONFIG.storeName).count();
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(0);
+                });
+            } catch (error) {
+                return 0;
+            }
+        }
+
+        async function clearCache() {
+            const db = await openDatabase();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction([CONFIG.storeName], "readwrite");
+                tx.objectStore(CONFIG.storeName).clear();
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
         async function cacheTile(url) {
             try {
-                const response = await fetchWithRetry(url);
-                if (response.status !== 200) {
-                    throw new Error(`Network response failed. Status: ${response.status}`);
-                }
-                const blob = response.data;
-                const db = await openDatabase();
-                const transaction = db.transaction(["tiles"], "readwrite");
-                const store = transaction.objectStore("tiles");
-                const putRequest = store.put({ url, blob });
-                putRequest.onerror = function (event) {
-                    console.error("Error adding tiles to IndexedDB:", event.target.errorCode);
-                };
+                if (await getCachedTile(url)) return; // already cached and fresh
+                const blob = await fetchTileBlob(url);
+                await putTile(url, blob);
             } catch (error) {
                 console.error("Error in cacheTile function:", error);
             }
@@ -120,56 +208,31 @@
 
         async function cacheMapTiles(mymap) {
             const quota = await checkStorageQuota();
-            if (quota && quota.percentUsed < 85) {
-                const tileUrls = [];
-                mymap.eachLayer((layer) => {
-                    if (layer instanceof L.TileLayer) {
-                        const zoom = mymap.getZoom();
-                        const bounds = mymap.getBounds();
-                        const tileSize = layer.getTileSize();
-                        const nwPoint = mymap.project(bounds.getNorthWest(), zoom).divideBy(tileSize.x).floor();
-                        const sePoint = mymap.project(bounds.getSouthEast(), zoom).divideBy(tileSize.y).floor();
-                        for (let x = nwPoint.x; x <= sePoint.x; x++) {
-                            for (let y = nwPoint.y; y <= sePoint.y; y++) {
-                                const tilePoint = new L.Point(x, y);
-                                tilePoint.z = zoom;
-                                const url = layer.getTileUrl(tilePoint);
-                                tileUrls.push(url);
-                            }
+            if (quota && quota.percentUsed >= CONFIG.hardSkipThreshold) {
+                console.warn("Tile caching skipped as storage quota is nearly full.");
+                return;
+            }
+            const tileUrls = [];
+            mymap.eachLayer((layer) => {
+                if (layer instanceof L.TileLayer) {
+                    const zoom = mymap.getZoom();
+                    const bounds = mymap.getBounds();
+                    const tileSize = layer.getTileSize();
+                    const nwPoint = mymap.project(bounds.getNorthWest(), zoom).divideBy(tileSize.x).floor();
+                    const sePoint = mymap.project(bounds.getSouthEast(), zoom).divideBy(tileSize.y).floor();
+                    for (let x = nwPoint.x; x <= sePoint.x; x++) {
+                        for (let y = nwPoint.y; y <= sePoint.y; y++) {
+                            const tilePoint = new L.Point(x, y);
+                            tilePoint.z = zoom;
+                            tileUrls.push(layer.getTileUrl(tilePoint));
                         }
                     }
-                });
-                for (const url of tileUrls) {
-                    await cacheTile(url);
-                }
-            } else {
-                console.warn("Tile caching skipped as storage quota is nearly full.");
-            }
-        }
-
-        async function getCachedTile(url) {
-            return new Promise(async (resolve, reject) => {
-                try {
-                    const db = await openDatabase();
-                    const transaction = db.transaction(["tiles"], "readonly");
-                    const store = transaction.objectStore("tiles");
-                    const getRequest = store.get(url);
-                    getRequest.onsuccess = function (event) {
-                        if (getRequest.result) {
-                            resolve(getRequest.result.blob);
-                        } else {
-                            resolve(null);
-                        }
-                    };
-                    getRequest.onerror = function (event) {
-                        console.error("Error retrieving tile from IndexedDB:", event.target.errorCode);
-                        resolve(null);
-                    };
-                } catch (error) {
-                    console.error("Error retrieving tile from IndexedDB:", error);
-                    resolve(null);
                 }
             });
+            for (const url of tileUrls) {
+                await cacheTile(url);
+            }
+            updateStatus();
         }
 
         function setTileFromBlob(tile, blob, done) {
@@ -188,16 +251,8 @@
                 if (blob) {
                     setTileFromBlob(tile, blob, done);
                 } else {
-                    fetchWithRetry(url).then((response) => {
-                        if (response.status !== 200) {
-                            throw new Error("Network response failed");
-                        }
-                        const blob = response.data;
-                        openDatabase().then((db) => {
-                            const transaction = db.transaction(["tiles"], "readwrite");
-                            const store = transaction.objectStore("tiles");
-                            store.put({ url, blob });
-                        }).catch((dbError) => {
+                    fetchTileBlob(url).then((blob) => {
+                        putTile(url, blob).catch((dbError) => {
                             console.error("Error caching tile:", dbError);
                         });
                         setTileFromBlob(tile, blob, done);
@@ -215,11 +270,45 @@
             return tile;
         };
 
+        // ---- Status panel ----
+
+        const netStatusEl = document.getElementById("netStatus");
+        const tileCountEl = document.getElementById("tileCount");
+        const storageUsageEl = document.getElementById("storageUsage");
+        const clearCacheBtn = document.getElementById("clearCacheBtn");
+
+        async function updateStatus() {
+            const online = navigator.onLine;
+            netStatusEl.textContent = online ? "● Online" : "● Offline";
+            netStatusEl.style.color = online ? "#2e7d32" : "#c62828";
+            tileCountEl.textContent = await countTiles();
+            const quota = await checkStorageQuota();
+            storageUsageEl.textContent = quota
+                ? `${(quota.used / 1048576).toFixed(1)} MB (${quota.percentUsed.toFixed(1)}%)`
+                : "n/a";
+        }
+
+        clearCacheBtn.addEventListener("click", async () => {
+            clearCacheBtn.disabled = true;
+            try {
+                await clearCache();
+            } catch (error) {
+                console.error("Error clearing cache:", error);
+            }
+            clearCacheBtn.disabled = false;
+            updateStatus();
+        });
+
+        window.addEventListener("online", updateStatus);
+        window.addEventListener("offline", updateStatus);
+
         let debounceTimer;
         mymap.on('moveend', function () {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => cacheMapTiles(mymap), 500);
         });
+
+        updateStatus();
     </script>
 </body>
 </html>

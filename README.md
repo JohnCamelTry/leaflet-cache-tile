@@ -4,10 +4,16 @@ This project is a web application that utilizes the [Leaflet.js](https://leaflet
 
 - **Tile Caching**: 
   - Map tiles are cached locally in the browser using `IndexedDB` to allow offline access or to reduce redundant network requests.
-  
-- **Storage Quota Check**:
-  - The app checks the available browser storage quota and issues a warning if more than 85% of the available space is used.
-  
+
+- **Persistent Cache (manual clear only)**:
+  - Cached tiles are kept indefinitely and are **never deleted automatically**. The only way to remove them is the **Clear cache** button in the status panel.
+
+- **Storage Quota Management**:
+  - The app reads the browser storage quota via `navigator.storage.estimate()`. Caching of **new** tiles is skipped above 95% usage (existing tiles are left untouched).
+
+- **Status Panel**:
+  - A small on-screen panel shows online/offline status, the number of cached tiles, current storage usage, and a button to clear the cache.
+
 - **Network Request Retries**:
   - If a tile request fails, the app automatically retries up to three times with a delay between each attempt.
 
@@ -17,11 +23,11 @@ This project is a web application that utilizes the [Leaflet.js](https://leaflet
    The app uses [Leaflet.js](https://leafletjs.com/) to render an interactive map on the page.
 
 2. **Caching with IndexedDB**:
-   - When the map loads, it retrieves map tiles via HTTP requests using the [Axios](https://github.com/axios/axios) library.
-   - Each tile is stored in the browser's `IndexedDB` to allow re-use if the tile is requested again, reducing redundant network requests and enabling offline functionality.
+   - When the map loads, it retrieves map tiles via HTTP requests using the native `fetch` API (no external HTTP client needed).
+   - Each tile is stored in the browser's `IndexedDB` keyed by its URL, so it can be re-used on later requests.
    
 3. **Storage Management**:
-   - The app checks the browser’s storage quota using the `navigator.storage.estimate()` API and logs the current usage. If the usage exceeds 85%, it stops caching additional tiles to avoid exceeding the storage limit.
+   - The app checks the browser’s storage quota using the `navigator.storage.estimate()` API. Above 95% usage it stops caching new tiles to avoid exceeding the limit. Existing cached tiles are never removed automatically — use the Clear cache button.
 
 4. **Retry Mechanism**:
    - The tile fetch function uses a retry mechanism to handle network failures. If a tile fails to load, the app retries the request up to three times with a 1-second delay between attempts.
@@ -30,7 +36,7 @@ This project is a web application that utilizes the [Leaflet.js](https://leaflet
 
 - **Leaflet.js**: A leading open-source library for interactive maps.
 - **IndexedDB**: A low-level browser storage API used for caching map tiles.
-- **Axios**: A promise-based HTTP client for JavaScript to handle network requests.
+- **Fetch API**: The native browser API used to handle network requests.
 
 ## Setup and Installation
 
