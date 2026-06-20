@@ -1,61 +1,69 @@
-# Leaflet and IndexedDB caching map tiles  
-This project is a web application that utilizes the [Leaflet.js](https://leafletjs.com/) library for interactive maps and adds functionality for caching map tiles using `IndexedDB`.
-## Features
+# Кэширование тайлов карты на Leaflet и IndexedDB
 
-- **Tile Caching**: 
-  - Map tiles are cached locally in the browser using `IndexedDB` to allow offline access or to reduce redundant network requests.
+Это веб-приложение использует библиотеку [Leaflet.js](https://leafletjs.com/) для отображения интерактивной карты и добавляет кэширование тайлов карты с помощью `IndexedDB`.
 
-- **Persistent Cache (manual clear only)**:
-  - Cached tiles are kept indefinitely and are **never deleted automatically**. The only way to remove them is the **Clear cache** button in the status panel.
+## Возможности
 
-- **Storage Quota Management**:
-  - The app reads the browser storage quota via `navigator.storage.estimate()`. Caching of **new** tiles is skipped above 95% usage (existing tiles are left untouched).
+- **Кэширование тайлов**:
+  - Тайлы карты кэшируются локально в браузере через `IndexedDB` — это даёт офлайн-доступ и снижает число повторных сетевых запросов.
 
-- **Status Panel**:
-  - A small on-screen panel shows online/offline status, the number of cached tiles, current storage usage, and a button to clear the cache.
+- **Постоянный кэш (очистка только вручную)**:
+  - Закэшированные тайлы хранятся бессрочно и **никогда не удаляются автоматически**. Единственный способ их удалить — кнопка **Clear cache** в панели статуса.
 
-- **Network Request Retries**:
-  - If a tile request fails, the app automatically retries up to three times with a delay between each attempt.
+- **Контроль квоты хранилища**:
+  - Приложение читает квоту браузерного хранилища через `navigator.storage.estimate()`. При заполнении выше 95% кэширование **новых** тайлов прекращается (уже сохранённые тайлы не трогаются).
 
-## How it Works
+- **Панель статуса**:
+  - Небольшая панель на экране показывает статус сети (онлайн/офлайн), число закэшированных тайлов, текущее использование хранилища и кнопку очистки кэша.
 
-1. **Leaflet for Map Rendering**: 
-   The app uses [Leaflet.js](https://leafletjs.com/) to render an interactive map on the page.
+- **Повторные попытки запросов**:
+  - Если запрос тайла не удался, приложение автоматически повторяет его до трёх раз с задержкой между попытками.
 
-2. **Caching with IndexedDB**:
-   - When the map loads, it retrieves map tiles via HTTP requests using the native `fetch` API (no external HTTP client needed).
-   - Each tile is stored in the browser's `IndexedDB` keyed by its URL, so it can be re-used on later requests.
-   
-3. **Storage Management**:
-   - The app checks the browser’s storage quota using the `navigator.storage.estimate()` API. Above 95% usage it stops caching new tiles to avoid exceeding the limit. Existing cached tiles are never removed automatically — use the Clear cache button.
+## Как это работает
 
-4. **Retry Mechanism**:
-   - The tile fetch function uses a retry mechanism to handle network failures. If a tile fails to load, the app retries the request up to three times with a 1-second delay between attempts.
+1. **Отрисовка карты через Leaflet**:
+   Приложение использует [Leaflet.js](https://leafletjs.com/) для отображения интерактивной карты на странице.
 
-## Technologies Used
+2. **Кэширование через IndexedDB**:
+   - При загрузке карты тайлы запрашиваются по HTTP с помощью нативного `fetch` (внешний HTTP-клиент не нужен).
+   - Каждый тайл сохраняется в `IndexedDB` браузера с ключом по его URL, что позволяет переиспользовать его при последующих запросах.
 
-- **Leaflet.js**: A leading open-source library for interactive maps.
-- **IndexedDB**: A low-level browser storage API used for caching map tiles.
-- **Fetch API**: The native browser API used to handle network requests.
+3. **Управление хранилищем**:
+   - Приложение проверяет квоту хранилища через API `navigator.storage.estimate()`. При заполнении выше 95% сохранение новых тайлов останавливается, чтобы не превысить лимит. Существующие тайлы автоматически не удаляются — используйте кнопку Clear cache.
 
-## Setup and Installation
+4. **Механизм повторов**:
+   - Функция загрузки тайла повторяет запрос при сетевых сбоях: до трёх раз с задержкой в 1 секунду между попытками.
 
-To run this project locally, follow the steps below:
+## Используемые технологии
 
-1. **Clone the repository**:
+- **Leaflet.js**: ведущая опенсорсная библиотека для интерактивных карт.
+- **IndexedDB**: низкоуровневый браузерный API хранилища, используемый для кэширования тайлов.
+- **Fetch API**: нативный браузерный API для сетевых запросов.
+
+## Установка и запуск
+
+Чтобы запустить проект локально, выполните шаги ниже:
+
+1. **Клонируйте репозиторий**:
 
    ```bash
    git clone https://github.com/JohnCamelTry/leaflet-cache-tile.git
    cd leaflet-cache-tile
-   
-2. **Open the project**:
+   ```
 
-Open index.html in your browser.
+2. **Запустите локальный HTTP-сервер**:
 
-3. **Developer Tools**:
+   `fetch` и `navigator.storage` требуют контекста `http://` (а не `file://`), поэтому файл нужно открывать через сервер. Например:
 
-To verify that map tiles are being cached correctly, open your browser’s developer tools (press F12).
-Navigate to the Applications tab.
-Under Storage, expand the IndexedDB section.
-Look for the database associated with this project, and you’ll be able to inspect the cached tiles within it.
+   ```bash
+   python3 -m http.server 8000
+   ```
 
+   Затем откройте в браузере `http://localhost:8000/cacheTiles.html`.
+
+3. **Инструменты разработчика**:
+
+   Чтобы убедиться, что тайлы кэшируются корректно, откройте инструменты разработчика в браузере (клавиша F12).
+   Перейдите на вкладку Application (Приложение).
+   В разделе Storage (Хранилище) раскройте секцию IndexedDB.
+   Найдите базу данных `mapCache` — в ней можно просмотреть закэшированные тайлы.
